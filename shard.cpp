@@ -1,11 +1,15 @@
 #include "shard.hpp"
 #include <cstring>
 #include <fcntl.h>
+#include <mutex>
+#include <shared_mutex>
 #include <unistd.h>
 #include <vector>
 
 using std::shared_mutex;
 using std::unique_lock;
+using std::shared_lock;
+
 
 namespace cache {
 
@@ -25,12 +29,17 @@ bool Shard::Put(int key, const PageBuf& buf) {
 Entry* Shard::Get(int key) { return get(key, true); }
 
 Entry* Shard::get(int key, bool loadFromFile) {
-  unique_lock<shared_mutex> lock(mu_);
-  auto it = m_.find(key);
-  if (it != m_.end()) return it->second.get();
+  {
+    shared_lock<shared_mutex> lock(mu_);
+    auto it = m_.find(key);
+    if (it != m_.end()) return it->second.get();
+  }
 
-  if (static_cast<int>(m_.size()) >= maxEntriesPerShard_) {
-    if (!evictOneLocked()) return nullptr;
+  {
+    unique_lock<shared_mutex> lock(mu_);
+    if (static_cast<int>(m_.size()) >= maxEntriesPerShard_) {
+      if (!evictOneLocked()) return nullptr;
+    }
   }
 
   auto e = std::make_unique<Entry>();
@@ -45,6 +54,8 @@ Entry* Shard::get(int key, bool loadFromFile) {
   }
 
   Entry* ptr = e.get();
+  
+  unique_lock<shared_mutex> lock(mu_);
   m_[key] = std::move(e);
   return ptr;
 }
@@ -55,7 +66,7 @@ bool Shard::Flush() {
     unique_lock<shared_mutex> lock(mu_);
     for (auto& p : m_) {
       Entry* e = p.second.get();
-      unique_lock<shared_mutex> entryLock(e->mu);
+      shared_lock<shared_mutex> entryLock(e->mu);
       if (e->isDirty) dirty.emplace_back(p.first, e);
     }
   }
